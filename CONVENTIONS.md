@@ -42,6 +42,12 @@ Working conventions for agents contributing to this repository. Read `CLAUDE.md`
 
 ## Verification (no tests, no linters — on-device is the only truth)
 
+Toolchain (non-negotiable):
+
+- **Node 14 / npm 6** — pinned in `.nvmrc`, matches CI. Modern npm cannot `npm ci` this repo (v1 lockfile + git dependencies ⇒ `EUSAGE` "lock file … does not satisfy"), and the `enyo` CLI (enyo-dev) breaks on modern Node. Use `nvm use` / `mise` / a `node:14` container before any install or build. Do **not** "fix" this by regenerating `package-lock.json` with a modern npm — that is a breaking change to CI and is out of scope for any task that isn't explicitly about the toolchain.
+- Initialize the submodule first: `git submodule update --init` (clone with `--recurse-submodules`). `npm ci` does not do this for you.
+- Expected noise: npm prints many `npm WARN deprecated` lines and (in containers) `TAR_ENTRY_ERROR EINVAL fchown` warnings. These are normal for this dependency tree. **Success = exit code 0**; never grade a build by stderr content.
+
 Build/deploy loop:
 
 ```sh

@@ -23,6 +23,7 @@ Mechanism detail (from [webosose/qml-webos-framework](https://github.com/webosos
 
 ## Constraints
 
+- **Build toolchain: Node 14 / npm 6 only** (`.nvmrc` provided; CI matrix uses 14.x). On Node 18+ the v1 `package-lock.json` with git dependencies fails `npm ci` with `EUSAGE: lock file's enyo-ilib@ does not satisfy enyo-ilib@2.7.0`, and the legacy `enyo-dev` CLI is not compatible with modern Node. `lib/enyo` is a git submodule and must be initialized (`git submodule update --init`) before `npm ci`. npm deprecation/`TAR_ENTRY_ERROR` warnings on stderr are expected and are not failures — judge builds by exit code only.
 - Target device: rooted webOS 4.4 TV, Homebrew Channel installed. Root method out of scope (prerequisite).
 - webOS 5–23 behavior must not change. Any webOS 4 path must be version-gated.
 - The stock screensaver replacement mechanism (mount-bind of `assets/screensaver-main.qml`, autostart via `/var/lib/webosbrew/init.d/`) stays; it is proven working on webOS 4.
