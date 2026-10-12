@@ -21,7 +21,8 @@ WebOSWindow {
     width : 1920
     height : 1080
     windowType : "_WEBOS_WINDOW_TYPE_SCREENSAVER"
-    color : "black"
+    // webOS 4 has no punch-through, so an opaque window covers the video plane.
+    color : isWebOS4 ? "transparent" : "black"
     appId : "com.webos.app.screensaver"
     visible : true
     property var poi
@@ -31,11 +32,24 @@ WebOSWindow {
     property int randomIndex
     property int stalledCounter : 0
     property string sourceAlt
+    property bool isWebOS4 : false
+    property string versionLabel : "unknown"
     property string basePath : "file:///media/developer/apps/usr/palm/applications/org.aabytt.webos.custom-screensaver-aerial/assets/"
     Component.onCompleted : {
+        // Version before any playback. Unknown stays on the webOS 5+ path.
+        detectWebOSVersion()
         init()
         notificationsService.set('disable')
-        playRandomVideo()
+        if (!isWebOS4)
+            playRandomVideo()
+    }
+    Component.onDestruction : {
+        if (!isWebOS4)
+            return
+        try {
+            videoOutput.stop()
+            videoOutput.source = ""
+        } catch (e) {}
     }
     I.ILib {
         id : ilib
@@ -50,6 +64,8 @@ WebOSWindow {
         running : true
         repeat : true
         onTriggered : {
+            if (isWebOS4 && (!settings || !playList || !poi))
+                return
             checkError()
             checkStatus()
             updateOSD()
@@ -60,6 +76,8 @@ WebOSWindow {
         fillMode : VideoOutput.PreserveAspectCrop
         width : parent.width
         height : parent.height - 1 // non fullscreen to avoid screensaver automatic disabling
+        // Opacity 1 on both paths. webOS 4 kept 0 in A1; the transparent window then showed the app underneath, not the plane.
+        opacity : 1
         source : ""
         visible : true
         autoPlay : true
@@ -76,7 +94,8 @@ WebOSWindow {
         }
         onPlaying : {
             punchThroughArea.visible = true
-            fadeInVideo.running = true
+            if (!isWebOS4)
+                fadeInVideo.running = true
             fadeInOsd.running = true
             osd.visible = true
         }
@@ -90,6 +109,7 @@ WebOSWindow {
             height : parent.height
             Rectangle {
                 id : opacityBox
+                visible : !isWebOS4
                 width : 1920
                 height : 1080
                 z : 1
@@ -138,8 +158,8 @@ WebOSWindow {
         }
         Text {
             id : name
-            opacity : settings.osdOpacity / 100
-            text : poi.strings[playList.assets[randomIndex].localizedNameKey]
+            opacity : isWebOS4 ? ((settings && settings.osdOpacity !== undefined) ? settings.osdOpacity / 100 : 0.6) : settings.osdOpacity / 100
+            text : isWebOS4 ? ((poi && playList && playList.assets && playList.assets[randomIndex]) ? (poi.strings[playList.assets[randomIndex].localizedNameKey] || "") : "") : poi.strings[playList.assets[randomIndex].localizedNameKey]
             font.family : segoeUILight.name
             font.letterSpacing : -1
             fontSizeMode : Text.Fit
@@ -152,7 +172,7 @@ WebOSWindow {
         Text {
             id : poiOSD
             opacity : name.opacity
-            text : poi.strings[playList.assets[randomIndex].pointsOfInterest[poiIndex]]
+            text : isWebOS4 ? ((poi && playList && playList.assets && playList.assets[randomIndex] && playList.assets[randomIndex].pointsOfInterest) ? (poi.strings[playList.assets[randomIndex].pointsOfInterest[poiIndex]] || "") : "") : poi.strings[playList.assets[randomIndex].pointsOfInterest[poiIndex]]
             font.family : name.font.family
             font.letterSpacing : name.font.letterSpacing
             fontSizeMode : name.fontSizeMode
@@ -193,7 +213,7 @@ WebOSWindow {
     }
     Text {
         id : debug
-        visible : settings.debug
+        visible : isWebOS4 ? (settings && settings.debug) : settings.debug
         horizontalAlignment : Text.AlignRight
         anchors.right : parent.right
         anchors.margins : 25
@@ -205,14 +225,125 @@ WebOSWindow {
         styleColor : name.styleColor
         fontSizeMode : name.fontSizeMode
     }
+    // webOS major from /var/run/nyx/os_info.json (webos_release). On this set that
+    // file is authoritative. luna systemproperty returned an empty body over SSH.
+    // major < 5 takes the webOS 4 path. If the file is unreadable, assets/platform.js
+    // written by apply.sh supplies WEBOS_MAJOR. Unknown stays on the webOS 5+ path.
+    function detectWebOSVersion() {
+        isWebOS4 = false
+        versionLabel = "unknown"
+        if (readWebOSReleaseFile("file:///var/run/nyx/os_info.json", "nyx"))
+            return
+        try {
+            Qt.include(basePath + "platform.js")
+            if (typeof WEBOS_MAJOR === "number") {
+                isWebOS4 = WEBOS_MAJOR < 5
+                versionLabel = "platform.js:" + (typeof WEBOS_RELEASE === "string" ? WEBOS_RELEASE : WEBOS_MAJOR)
+                return
+            }
+        } catch (e) {
+            versionLabel = "platform.js-include:" + e
+        }
+        readPlatformJs(basePath + "platform.js")
+    }
+    function applyWebOSRelease(rel, source) {
+        if (!rel)
+            return false
+        var major = parseInt(String(rel).split(".")[0], 10)
+        if (isNaN(major))
+            return false
+        isWebOS4 = major < 5
+        versionLabel = source + ":" + rel
+        return true
+    }
+    function readWebOSReleaseFile(url, source) {
+        try {
+            var xhr = new XMLHttpRequest()
+            xhr.open("GET", url, false)
+            xhr.send(null)
+            if (!xhr.responseText)
+                return false
+            var info = JSON.parse(xhr.responseText)
+            return applyWebOSRelease(info.webos_release, source)
+        } catch (e) {
+            versionLabel = source + ":" + e
+            return false
+        }
+    }
+    function readPlatformJs(url) {
+        try {
+            var xhr = new XMLHttpRequest()
+            xhr.open("GET", url, false)
+            xhr.send(null)
+            if (!xhr.responseText)
+                return false
+            var majorMatch = xhr.responseText.match(/WEBOS_MAJOR\s*=\s*(\d+)/)
+            var relMatch = xhr.responseText.match(/WEBOS_RELEASE\s*=\s*"([^"]*)"/)
+            if (!majorMatch)
+                return false
+            var major = parseInt(majorMatch[1], 10)
+            isWebOS4 = major < 5
+            versionLabel = "platform.js:" + (relMatch ? relMatch[1] : major)
+            return true
+        } catch (e) {
+            versionLabel = "platform.js-xhr:" + e
+            return false
+        }
+    }
     function init() {
         loadJSONData(basePath + 'settings.json', 'settings', loadResources)
     }
     function loadResources() {
+        if (isWebOS4) {
+            loadJSONData(basePath + 'videos.json', 'playList', function () {
+                loadJSONData(basePath + 'locales/' + settings.localeLang + '.json', 'poi', playRandomVideo)
+            })
+            return
+        }
         loadJSONData(basePath + 'videos.json', 'playList')
         loadJSONData(basePath + 'locales/' + settings.localeLang + '.json', 'poi', playRandomVideo)
     }
+    function playWebOS4Video() {
+        if (!playList || !playList.assets || !playList.assets.length || !settings)
+            return
+        stalledCounter = 0
+        var attempts = 0
+        var maxAttempts = playList.assets.length + 2
+        while (attempts < maxAttempts) {
+            attempts++
+            randomIndex = Math.floor(Math.random() * playList.assets.length)
+            if (playList.assets[randomIndex].viewed)
+                continue
+            if (startWebOS4Asset(playList.assets[randomIndex]))
+                return
+        }
+        var j
+        for (j = 0; j < playList.assets.length; j++)
+            playList.assets[j].viewed = false
+        randomIndex = Math.floor(Math.random() * playList.assets.length)
+        startWebOS4Asset(playList.assets[randomIndex])
+    }
+    function startWebOS4Asset(asset) {
+        var url = ""
+        if (asset["url-1080-H264"]) {
+            sourceAlt = " - webOS 4 url-1080-H264"
+            url = asset["url-1080-H264"]
+        } else if (asset["url-1080-SDR"]) {
+            sourceAlt = " - webOS 4 url-1080-SDR"
+            url = asset["url-1080-SDR"]
+        }
+        if (!url)
+            return false
+        notificationsService.set('disable')
+        videoOutput.source = url
+        videoOutput.play()
+        return true
+    }
     function playRandomVideo() {
+        if (isWebOS4) {
+            playWebOS4Video()
+            return
+        }
         stalledCounter = 0
         randomIndex = Math.floor(Math.random() * playList.assets.length)
         if (!playList.assets[randomIndex].viewed) {
@@ -254,7 +385,8 @@ WebOSWindow {
             playList.assets[randomIndex].viewed = true
         }
         if (Math.floor(videoOutput.position / 1000) == Math.floor(videoOutput.duration / 1000) - 5) {
-            fadeOutVideo.running = true
+            if (!isWebOS4)
+                fadeOutVideo.running = true
             fadeOutOsd.running = true
         }
         if (videoOutput.status == MediaPlayer.EndOfMedia) 
@@ -304,6 +436,7 @@ WebOSWindow {
         }
 
         debug.text = "Video " + randomIndex + " of " + playList.assets.length +
+        "\n webOS: " + versionLabel + (isWebOS4 ? " path=4" : " path=5+") +
         "\n Source Type: " + settings.sourceType + sourceAlt +
         "\n Try Other Source: " + settings.playLowerQuality +
         "\n Locale: " + settings.localeLang +
@@ -346,7 +479,8 @@ WebOSWindow {
 
     Service {
         id : notificationsService
-        appId : globalVars.appId
+        // Creation-time binding. webOS 5+ still uses globalVars.appId when it exists.
+        appId : (typeof globalVars !== "undefined" && globalVars.appId) ? globalVars.appId : "com.webos.app.screensaver"
         function set(param) {
             call("luna://com.webos.notification/", param)
         }
