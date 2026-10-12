@@ -1,14 +1,19 @@
-<!-- Summary: webOS 4 video fix for Aerial. Stage A is QML-only and gated on version (based on the alexastall fork); stage B is a native ACB helper fallback. -->
+<!-- Summary (round 2): webOS 4 video fix for Aerial. Stage A is QML-only and gated on version (based on the alexastall fork); stage B is a native ACB helper fallback. Run autonomously; no approval wait. -->
 
-You are working on the Aerial custom screensaver for LG webOS TVs. Start in PLAN MODE: read the code, write a plan, and wait for approval before editing.
+You are working on the Aerial custom screensaver for LG webOS TVs. This is a NON-INTERACTIVE run (--always-approve). Nobody will answer questions or approve a plan. Do NOT stop after planning: write a short plan in your output, then immediately implement, deploy, and verify. Finish with a written report (see end).
+
+## Attempt log
+- Round 1: the agent started in plan mode, read the repo, and exited without changing, deploying, or testing anything (it waited for an approval that never comes). No RTSP result.
+- Pre-check by the orchestrator: `ssh root@192.168.11.55` with default settings fails (publickey). The working SSH config is NOT in the default location: use `ssh -F ~/.ssh/ssh_config tv` and `scp -F ~/.ssh/ssh_config <file> tv:<path>` (Host tv -> 192.168.11.55, user root, key already configured). The RTSP camera is reachable: ffmpeg grabbed a frame from rtsp://192.168.11.179:554/live/ch00_0.
+- Repo notes: AGENTS.md and deploy-and-check.sh exist in the repo; deploy-and-check.sh uses plain `ssh root@...`, so pass the -F config (or export GIT/SSH options) rather than relying on its defaults. Do not edit ~/.ssh.
 
 ## Goal
 Make Aerial video actually show on screen on webOS 4, and keep webOS 5+ behaving exactly as it does today.
 
 ## Environment (fill in)
-- TV: webOS 4.x, rooted, Homebrew Channel, SSH as root at <TV_IP> (ssh root@<TV_IP>)
-- IP camera pointed at the TV: <RTSP_URL>
-- Repo: clone https://github.com/aabytt/custom-screensaver-aerial and add the remote https://github.com/alexastall/custom-screensaver-aerial (its webOS 4 attempt is 9 commits ahead of upstream main)
+- TV: webOS 4.x, rooted, Homebrew Channel, 192.168.11.55. SSH: ssh -F ~/.ssh/ssh_config tv
+- IP camera pointed at the TV: rtsp://192.168.11.179:554/live/ch00_0
+- Repo: you are in it (~/Repositories/custom-screensaver-aerial, a copy of aabytt upstream). Add the remote https://github.com/alexastall/custom-screensaver-aerial (its webOS 4 attempt is 9 commits ahead of upstream main)
 
 ## Background (verified research)
 - The screensaver is the QML file assets/screensaver-main.qml. assets/apply.sh bind-mounts it over /usr/palm/applications/com.webos.app.screensaver/qml/main.qml. Autostart is a symlink at /var/lib/webosbrew/init.d/50-custom-screensaver-aerial. The app is installed at /media/developer/apps/usr/palm/applications/org.aabytt.webos.custom-screensaver-aerial/.
@@ -22,7 +27,7 @@ Make Aerial video actually show on screen on webOS 4, and keep webOS 5+ behaving
 - Smallest change possible. Every webOS 4 behaviour goes behind a runtime version check. The webOS 5+ code path (PunchThrough, black window, fade overlay) stays byte-for-byte unchanged in behaviour.
 - Version detection: try luna://com.webos.service.tv.systemproperty/getSystemInfo {"keys":["sdkVersion"]} or /var/run/nyx/os_info.json. Check first on the TV over SSH which one works, because neither has been verified.
 - Don't change the window type away from SCREENSAVER.
-- Don't commit anything without approval.
+- Do NOT git commit or push. Leave changes uncommitted in the working tree so they can be reviewed. Do not edit prompts/next.md.
 
 ## Plan, stage A (QML only)
 1. Diff upstream against alexastall: git diff origin/main alexastall/main. Bring over only the webOS 4 pieces and gate them on the version.
@@ -36,7 +41,8 @@ Make Aerial video actually show on screen on webOS 4, and keep webOS 5+ behaving
 A native webOS 4 helper modelled on https://github.com/webosbrew/samples/tree/main/media/smp/acb (acb_plane.c, main.c): AcbAPI_create, then AcbAPI_initialize(id, PLAYER_TYPE_MSE, appId, cb), then AcbAPI_setMediaId before Load(), then AcbAPI_setDisplayWindow fullscreen after Load. Only after LOADCOMPLETED: AcbAPI_setSinkType(SINK_TYPE_MAIN), then setState(APPSTATE_FOREGROUND, PLAYSTATE_LOADED), then PLAYING. On exit, UNLOADED, then finalize and destroy. setMediaVideoData takes three arguments, despite what the header says. Build with the buildroot-nc4 toolchain (target media-smp-acb-webos4). The sample plays raw Annex-B H.264, so MP4 demuxing is needed. If ACB leaks and the screen goes black, run "restart AcbService". The QML launches the helper and stays transparent. Nothing changes on webOS 5+, where libAcbAPI isn't present.
 
 ## Verification (required for every attempt)
-1. Grab a baseline frame before launching: ffmpeg -rtsp_transport tcp -i "<RTSP_URL>" -frames:v 1 -y before.jpg
+Save every frame under ./rtsp-evidence/round2/ in the repo (create it; e.g. before.jpg, a1-after1.jpg, a1-after2.jpg, per attempt) and write ./rtsp-evidence/round2/results.md with YAVG and SSIM/PSNR per attempt.
+1. Grab a baseline frame before launching: ffmpeg -rtsp_transport tcp -i "rtsp://192.168.11.179:554/live/ch00_0" -frames:v 1 -y before.jpg
 2. Launch the screensaver, wait about 15 s, then grab after1.jpg, wait 5 s more and grab after2.jpg.
 3. Prove there's real video, not a black screen or a static overlay: the TV area should have a mean luma clearly above black, for example ffmpeg -i after1.jpg -vf signalstats -f null - (look at YAVG), and after1 and after2 should differ (moving video), for example with ffmpeg's ssim/psnr filter or an ImageMagick compare. Look at the images yourself as well.
 4. Exit the screensaver (press a remote key or send the luna call) and confirm the TV returns to normal and the remote works.
@@ -46,4 +52,7 @@ A native webOS 4 helper modelled on https://github.com/webosbrew/samples/tree/ma
 - Video visibly appears on the webOS 4 TV, not a blank or black screen.
 - The RTSP frames prove non-blank, changing video content (attach the luma and difference numbers plus the images).
 - webOS 5+ behaviour is unchanged.
-- The change is minimal and gated on version. Report the final diff, the attempt log (what was tried and the RTSP result for each), and any remaining issues.
+- The change is minimal and gated on version.
+
+## Final report (print at the end of your output)
+webOS version detected and how; files changed (git diff --stat); each attempt with its variation and RTSP numbers; whether video was visible; errors from TV logs; your recommendation for the next step (another stage A variation, or stage B). Report the final diff, the attempt log (what was tried and the RTSP result for each), and any remaining issues.
