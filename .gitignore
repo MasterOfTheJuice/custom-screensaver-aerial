@@ -1,3 +1,7 @@
 node_modules
 .enyocache
 dist
+
+# local build output and test evidence
+native/aerial-acb
+rtsp-evidence/

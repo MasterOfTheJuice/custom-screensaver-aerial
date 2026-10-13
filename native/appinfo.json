@@ -1,0 +1,17 @@
+{
+  "id": "org.aabytt.webos.custom-screensaver-aerial.acb",
+  "version": "1.0.4",
+  "vendor": "aabytt",
+  "type": "native",
+  "main": "aerial-acb",
+  "title": "Aerial ACB",
+  "icon": "icon.png",
+  "iconColor": "#03A9F4",
+  "bgColor": "#00000000",
+  "visible": false,
+  "noSplashOnLaunch": true,
+  "spinnerOnLaunch": false,
+  "transparent": true,
+  "defaultWindowType": "card",
+  "requiredPermissions": ["applications.launch"]
+}

@@ -35,6 +35,13 @@ WebOSWindow {
     property bool isWebOS4 : false
     property string versionLabel : "unknown"
     property string basePath : "file:///media/developer/apps/usr/palm/applications/org.aabytt.webos.custom-screensaver-aerial/assets/"
+    // Companion native app. Jailer-only spawn never took the MAIN sink; SAM launch of this id did.
+    property string acbAppId : "org.aabytt.webos.custom-screensaver-aerial.acb"
+    property bool acbLaunched : false
+    property bool acbQuerying : false
+    property bool acbStopArmed : false
+    property string acbReturnTo : ""
+    property string acbStatus : "idle"
     Component.onCompleted : {
         // Version before any playback. Unknown stays on the webOS 5+ path.
         detectWebOSVersion()
@@ -46,6 +53,7 @@ WebOSWindow {
     Component.onDestruction : {
         if (!isWebOS4)
             return
+        stopAcbHelper()
         try {
             videoOutput.stop()
             videoOutput.source = ""
@@ -79,7 +87,8 @@ WebOSWindow {
         // Opacity 1 on both paths. webOS 4 kept 0 in A1; the transparent window then showed the app underneath, not the plane.
         opacity : 1
         source : ""
-        visible : true
+        // webOS 4 draws with the ACB helper. Hide this item so an empty player does not cover that plane.
+        visible : !isWebOS4
         autoPlay : true
         onStopped : {
             punchThroughArea.visible = false
@@ -307,37 +316,42 @@ WebOSWindow {
         if (!playList || !playList.assets || !playList.assets.length || !settings)
             return
         stalledCounter = 0
-        var attempts = 0
-        var maxAttempts = playList.assets.length + 2
-        while (attempts < maxAttempts) {
-            attempts++
-            randomIndex = Math.floor(Math.random() * playList.assets.length)
-            if (playList.assets[randomIndex].viewed)
-                continue
-            if (startWebOS4Asset(playList.assets[randomIndex]))
-                return
-        }
-        var j
-        for (j = 0; j < playList.assets.length; j++)
-            playList.assets[j].viewed = false
-        randomIndex = Math.floor(Math.random() * playList.assets.length)
-        startWebOS4Asset(playList.assets[randomIndex])
-    }
-    function startWebOS4Asset(asset) {
-        var url = ""
-        if (asset["url-1080-H264"]) {
-            sourceAlt = " - webOS 4 url-1080-H264"
-            url = asset["url-1080-H264"]
-        } else if (asset["url-1080-SDR"]) {
-            sourceAlt = " - webOS 4 url-1080-SDR"
-            url = asset["url-1080-SDR"]
-        }
-        if (!url)
-            return false
+        // webOS 4 does not start the QML Video item. The helper reads videos.json
+        // (launch param "videos") and plays url-1080-H264, then url-1080-SDR.
+        // sourceType and playLowerQuality are passed through; the H.264 pipeline
+        // still prefers url-1080-H264 because the other 1080 entries are HEVC.
+        randomIndex = 0
+        sourceAlt = " - webOS 4 acb playlist"
         notificationsService.set('disable')
-        videoOutput.source = url
-        videoOutput.play()
-        return true
+        launchAcbHelper()
+    }
+    function launchAcbHelper() {
+        if (acbLaunched || acbQuerying)
+            return
+        acbQuerying = true
+        acbStatus = "query-foreground"
+        acbQueryTimeout.start()
+        acbService.queryForeground()
+    }
+    function beginAcbPlayback() {
+        if (acbLaunched)
+            return
+        acbQuerying = false
+        acbLaunched = true
+        acbStatus = "launching " + acbReturnTo
+        acbService.launch()
+        armAcbStop.start()
+    }
+    function stopAcbHelper() {
+        // A SAM launch can dismiss this window at once. Closing the helper from that
+        // destruction would kill the picture we just started, so the stop stays disarmed
+        // until the window has been up long enough to be a real exit.
+        if (!acbLaunched || !acbStopArmed)
+            return
+        acbLaunched = false
+        acbStopArmed = false
+        acbStatus = "closing"
+        acbService.stop()
     }
     function playRandomVideo() {
         if (isWebOS4) {
@@ -372,6 +386,8 @@ WebOSWindow {
     }
 
     function checkError() {
+        if (isWebOS4)
+            return
         if (videoOutput.error !== 0) {
             notificationsService.set('enable')
             punchThroughArea.visible = false
@@ -380,6 +396,11 @@ WebOSWindow {
     }
 
     function checkStatus() {
+        if (isWebOS4) {
+            if (settings && playList && playList.assets)
+                debug.text = "webOS: " + versionLabel + " path=4 acb\n" + acbStatus
+            return
+        }
         if (videoOutput.position > 2000) {
             notificationsService.set('enable')
             playList.assets[randomIndex].viewed = true
@@ -477,6 +498,69 @@ WebOSWindow {
             poiIndex = Math.floor(videoOutput.position / 1000)        
     }
 
+    Timer {
+        id : armAcbStop
+        interval : 4000
+        repeat : false
+        onTriggered : acbStopArmed = true
+    }
+    Timer {
+        id : acbQueryTimeout
+        interval : 1500
+        repeat : false
+        onTriggered : beginAcbPlayback()
+    }
+    Item {
+        id : keyCatcher
+        anchors.fill : parent
+        focus : isWebOS4
+        Keys.onPressed : {
+            if (!isWebOS4)
+                return
+            acbStopArmed = true
+            stopAcbHelper()
+        }
+    }
+    Service {
+        id : acbService
+        appId : (typeof globalVars !== "undefined" && globalVars.appId) ? globalVars.appId : "com.webos.app.screensaver"
+        onResponse : {
+            acbStatus = method + " " + payload
+            if (!acbQuerying || method.indexOf("getForegroundAppInfo") < 0)
+                return
+            try {
+                var info = JSON.parse(payload)
+                var id = info.appId || ""
+                if (id && id !== acbAppId && id.indexOf("screensaver") < 0 && id.indexOf("hdmi") < 0)
+                    acbReturnTo = id
+            } catch (e) {}
+            beginAcbPlayback()
+        }
+        function queryForeground() {
+            call("luna://com.webos.applicationManager", "/getForegroundAppInfo", "{}")
+        }
+        function launch() {
+            var params = {
+                log : "/tmp/aerial-acb.log",
+                videos : "/media/developer/apps/usr/palm/applications/org.aabytt.webos.custom-screensaver-aerial/assets/videos.json",
+                sourceType : (settings && settings.sourceType) ? settings.sourceType : "",
+                playLowerQuality : (settings && settings.playLowerQuality) ? "true" : "false"
+            }
+            if (acbReturnTo)
+                params.returnTo = acbReturnTo
+            call("luna://com.webos.applicationManager",
+                "/launch",
+                JSON.stringify({
+                    id : acbAppId,
+                    params : params
+                }))
+        }
+        function stop() {
+            call("luna://com.webos.applicationManager",
+                "/closeByAppId",
+                JSON.stringify({ id : acbAppId }))
+        }
+    }
     Service {
         id : notificationsService
         // Creation-time binding. webOS 5+ still uses globalVars.appId when it exists.
