@@ -168,7 +168,9 @@ WebOSWindow {
         Text {
             id : name
             opacity : isWebOS4 ? ((settings && settings.osdOpacity !== undefined) ? settings.osdOpacity / 100 : 0.6) : settings.osdOpacity / 100
-            text : isWebOS4 ? ((poi && playList && playList.assets && playList.assets[randomIndex]) ? (poi.strings[playList.assets[randomIndex].localizedNameKey] || "") : "") : poi.strings[playList.assets[randomIndex].localizedNameKey]
+            // webOS 4's QML process does not stay up once the helper card is in front.
+            // The helper draws the place name for the URL it is actually playing.
+            text : isWebOS4 ? "" : poi.strings[playList.assets[randomIndex].localizedNameKey]
             font.family : segoeUILight.name
             font.letterSpacing : -1
             fontSizeMode : Text.Fit
@@ -181,7 +183,7 @@ WebOSWindow {
         Text {
             id : poiOSD
             opacity : name.opacity
-            text : isWebOS4 ? ((poi && playList && playList.assets && playList.assets[randomIndex] && playList.assets[randomIndex].pointsOfInterest) ? (poi.strings[playList.assets[randomIndex].pointsOfInterest[poiIndex]] || "") : "") : poi.strings[playList.assets[randomIndex].pointsOfInterest[poiIndex]]
+            text : isWebOS4 ? "" : poi.strings[playList.assets[randomIndex].pointsOfInterest[poiIndex]]
             font.family : name.font.family
             font.letterSpacing : name.font.letterSpacing
             fontSizeMode : name.fontSizeMode
@@ -544,7 +546,9 @@ WebOSWindow {
                 log : "/tmp/aerial-acb.log",
                 videos : "/media/developer/apps/usr/palm/applications/org.aabytt.webos.custom-screensaver-aerial/assets/videos.json",
                 sourceType : (settings && settings.sourceType) ? settings.sourceType : "",
-                playLowerQuality : (settings && settings.playLowerQuality) ? "true" : "false"
+                playLowerQuality : (settings && settings.playLowerQuality) ? "true" : "false",
+                locale : (settings && settings.localeLang) ? settings.localeLang : "",
+                osdOpacity : (settings && settings.osdOpacity !== undefined) ? String(settings.osdOpacity) : ""
             }
             if (acbReturnTo)
                 params.returnTo = acbReturnTo

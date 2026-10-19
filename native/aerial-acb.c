@@ -23,6 +23,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <glib.h>
@@ -34,6 +35,7 @@
 #include "http_curl.h"
 #include "mp4_avc.h"
 #include "pacer.h"
+#include "osd_label.h"
 #include "playlist.h"
 #include "sdl_shell.h"
 #include "smp_player.h"
@@ -59,6 +61,71 @@
  * the card, because a card exit otherwise falls back to that HDMI input. */
 
 static char return_to[128];
+
+/* stderr is the only log. Cap it so a long playback cannot fill /tmp, and
+ * remove it on the way out of main. A crash still leaves the file. */
+#define LOG_CAP_BYTES (1024 * 1024)
+static char g_log_path[PATH_MAX];
+
+static void log_reopen(const char *path, const char *mode) {
+    FILE *log = freopen(path, mode, stderr);
+    if (log == NULL) {
+        return;
+    }
+    setvbuf(stderr, NULL, _IOLBF, 0);
+    dup2(fileno(stderr), fileno(stdout));
+}
+
+static void log_open(const char *path) {
+    struct stat st;
+    if (path == NULL || path[0] == '\0') {
+        return;
+    }
+    if (stat(path, &st) == 0 && st.st_size > LOG_CAP_BYTES) {
+        char rotated[PATH_MAX];
+        snprintf(rotated, sizeof(rotated), "%s.1", path);
+        rename(path, rotated);
+    }
+    log_reopen(path, "w");
+    snprintf(g_log_path, sizeof(g_log_path), "%s", path);
+    fprintf(stderr, "[main] log %s cap %d bytes, removed on clean exit\n", path, LOG_CAP_BYTES);
+}
+
+static void log_rotate_if_big(void) {
+    struct stat st;
+    char rotated[PATH_MAX];
+    if (g_log_path[0] == '\0') {
+        return;
+    }
+    if (stat(g_log_path, &st) != 0 || st.st_size <= LOG_CAP_BYTES) {
+        return;
+    }
+    fflush(stderr);
+    snprintf(rotated, sizeof(rotated), "%s.1", g_log_path);
+    rename(g_log_path, rotated);
+    log_reopen(g_log_path, "w");
+    fprintf(stderr, "[main] log rotated at %ld bytes\n", (long) st.st_size);
+}
+
+static void log_remove(void) {
+    char rotated[PATH_MAX];
+    if (g_log_path[0] == '\0') {
+        return;
+    }
+    fprintf(stderr, "[main] clean exit, removing log\n");
+    fflush(stderr);
+    unlink(g_log_path);
+    snprintf(rotated, sizeof(rotated), "%s.1", g_log_path);
+    unlink(rotated);
+    g_log_path[0] = '\0';
+}
+
+static const char *title_of(const playlist *list, int index) {
+    if (list == NULL || index < 0 || index >= list->count || list->names[index] == NULL) {
+        return "";
+    }
+    return list->names[index];
+}
 
 /* Real previous apps only. Inputs and this screensaver stack are not relaunched. */
 static bool return_to_allowed(const char *id) {
@@ -431,8 +498,9 @@ static int net_advance(http_client *http, playlist *list, struct prefetch *prefe
         }
         if (got != NULL) {
             *movie = got;
-            fprintf(stderr, "[play] switch open %.0f ms, network bytes %lld\n",
-                    (double) (pacer_now_ns() - t0) / 1e6, (long long) http_bytes_downloaded());
+            fprintf(stderr, "[play] switch open %.0f ms, network bytes %lld, title \"%s\"\n",
+                    (double) (pacer_now_ns() - t0) / 1e6, (long long) http_bytes_downloaded(),
+                    title_of(list, *index));
             if (list->count > 1) {
                 prefetch_start(prefetch, list->urls[(*index + 1) % list->count]);
             }
@@ -503,12 +571,16 @@ int main(int argc, char *argv[]) {
      * home screen there is no console, so without a log file nothing below is visible. */
     const char *launch_params = app_launch_params(argc, argv);
     char log_path[PATH_MAX];
+    char opts_locale[32];
+    int opts_opacity = -1;
+    opts_locale[0] = '\0';
     if (app_launch_param_string(launch_params, "log", log_path, sizeof(log_path))) {
-        app_log_to_file(log_path);
+        log_open(log_path);
     }
 
     options opts;
     if (!parse_options(argc, argv, &opts)) {
+        log_remove();
         return 2;
     }
     return_to[0] = '\0';
@@ -523,6 +595,14 @@ int main(int argc, char *argv[]) {
             char lower[16];
             if (app_launch_param_string(launch_params, "playLowerQuality", lower, sizeof(lower))) {
                 opts.play_lower = (strcmp(lower, "true") == 0 || strcmp(lower, "1") == 0);
+            }
+        }
+        app_launch_param_string(launch_params, "locale", opts_locale, sizeof(opts_locale));
+        {
+            char opacity[16];
+            if (app_launch_param_string(launch_params, "osdOpacity", opacity, sizeof(opacity)) &&
+                opacity[0] != '\0') {
+                opts_opacity = atoi(opacity);
             }
         }
     }
@@ -572,6 +652,7 @@ int main(int argc, char *argv[]) {
     memset(&audio_sample, 0, sizeof(audio_sample));
     memset(&next_movie, 0, sizeof(next_movie));
     if (audio == NULL) {
+        log_remove();
         return 1;
     }
 
@@ -579,12 +660,14 @@ int main(int argc, char *argv[]) {
     sdl_shell shell;
     if (!sdl_shell_preinit() || !sdl_shell_open_window(&shell, "SMP ACB")) {
         es_file_close(audio);
+        log_remove();
         return 1;
     }
     /* Clear to transparent once, up front: from here on the screen belongs to the video
      * plane, and the sample has nothing of its own to draw. */
     sdl_shell_present_transparent(&shell);
     fprintf(stderr, "[main @%.0fms] SDL window up\n", pacer_uptime_ms());
+    osd_label *label = NULL;
 
     sibling_path("cacert.pem", g_ca_path, sizeof(g_ca_path));
     sibling_path("videos.json", videos_fallback, sizeof(videos_fallback));
@@ -596,7 +679,8 @@ int main(int argc, char *argv[]) {
                                           : "/media/developer/apps/usr/palm/applications/"
                                             "org.aabytt.webos.custom-screensaver-aerial/assets/videos.json";
         int i;
-        if (playlist_load(play, videos_path, videos_fallback, opts.source_type, opts.play_lower) == 0) {
+        if (playlist_load(play, videos_path, videos_fallback, opts.source_type, opts.play_lower,
+                          opts_locale, opts_opacity) == 0) {
             for (i = 0; i < play->count; i++) {
                 char err[192];
                 struct pump_ctx ctx;
@@ -608,9 +692,9 @@ int main(int argc, char *argv[]) {
                 if (movie != NULL) {
                     movie_index = i;
                     use_network = 1;
-                    fprintf(stderr, "[play] playing %s open %.0f ms, network bytes %lld\n",
-                            url_leaf(play->urls[i]), (double) (pacer_now_ns() - t0) / 1e6,
-                            (long long) http_bytes_downloaded());
+                    fprintf(stderr, "[play] playing %s title \"%s\" open %.0f ms, network bytes %lld\n",
+                            url_leaf(play->urls[i]), title_of(play, i),
+                            (double) (pacer_now_ns() - t0) / 1e6, (long long) http_bytes_downloaded());
                     break;
                 }
                 fprintf(stderr, "[play] skip %s: %s\n", url_leaf(play->urls[i]), err);
@@ -683,6 +767,10 @@ int main(int argc, char *argv[]) {
             .aac_object_type = es_file_aac_object_type(audio),
     };
 
+    /* GStreamer-CRITICAL "still has a parent registry0" (dvbin, lxvideosink,
+     * aac_audiodec, audiosink) is printed by LG's plugin registry while Load
+     * and Unload dispose features that are still parented. This process does
+     * not call GStreamer. The lines are noise; the picture still plays. */
     fprintf(stderr, "[main @%.0fms] calling Load %dx%d fps %d/%d network=%d\n", pacer_uptime_ms(),
             width, height, fps_num, fps_den, use_network);
     if (!smp_player_load(player, &params)) {
@@ -700,6 +788,23 @@ int main(int argc, char *argv[]) {
      * clock_origin starts when the pipeline accepts the first buffer. Starting it
      * during Load would make the pacer skip ahead.
      */
+    if (use_network && play != NULL) {
+        char font_path[PATH_MAX];
+        char dir[PATH_MAX];
+        const char *videos_for_font = opts.videos_json[0] != '\0' ? opts.videos_json : videos_fallback;
+        char *slash;
+        snprintf(dir, sizeof(dir), "%s", videos_for_font);
+        slash = strrchr(dir, '/');
+        if (slash != NULL) {
+            *slash = '\0';
+        }
+        snprintf(font_path, sizeof(font_path), "%s/SegoeUI-Light.ttf", dir);
+        if (access(font_path, R_OK) != 0) {
+            sibling_path("SegoeUI-Light.ttf", font_path, sizeof(font_path));
+        }
+        label = osd_label_create(shell.window, shell.renderer, font_path);
+    }
+
     have_audio = es_file_next(audio, &audio_sample);
 
     if (use_network) {
@@ -796,21 +901,30 @@ int main(int argc, char *argv[]) {
         if (feed_video) {
             fed_video++;
             if (use_network && movie_frames == 0) {
+                double title_s = avc_movie_duration_s(movie);
+                if (play->cap_sec > 0 && (title_s <= 0 || play->cap_sec < title_s)) {
+                    title_s = play->cap_sec;
+                }
+                osd_label_set(label, title_of(play, movie_index), title_s, play->osd_opacity);
                 if (switch_mark != 0) {
-                    fprintf(stderr, "[play] first picture %s gap %.0f ms\n",
-                            url_leaf(avc_movie_url(movie)),
+                    fprintf(stderr, "[play] first picture %s title \"%s\" gap %.0f ms\n",
+                            url_leaf(avc_movie_url(movie)), title_of(play, movie_index),
                             (double) (pacer_now_ns() - switch_mark) / 1e6);
                     switch_mark = 0;
                 } else {
-                    fprintf(stderr, "[play] first picture %s at %.0f ms, bytes %lld\n",
-                            url_leaf(avc_movie_url(movie)), pacer_uptime_ms(),
-                            (long long) http_bytes_downloaded());
+                    fprintf(stderr, "[play] first picture %s title \"%s\" at %.0f ms, bytes %lld\n",
+                            url_leaf(avc_movie_url(movie)), title_of(play, movie_index),
+                            pacer_uptime_ms(), (long long) http_bytes_downloaded());
                 }
+            }
+            if (use_network) {
+                osd_label_tick(label, (double) (pts - pts_base) / 1e9);
             }
             if (use_network) {
                 movie_frames++;
             }
             if (fed_video % 300 == 0) {
+                log_rotate_if_big();
                 if (use_network) {
                     fprintf(stderr,
                             "[main] fed %ld video / %ld audio, media %.1f s, %s, bytes %lld\n",
@@ -859,5 +973,7 @@ teardown:
     }
     es_file_close(video);
     es_file_close(audio);
+    osd_label_destroy(label);
+    log_remove();
     return exit_code;
 }

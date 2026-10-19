@@ -20,8 +20,9 @@ CFLAGS="-D_LARGEFILE_SOURCE -D_LARGEFILE64_SOURCE -D_FILE_OFFSET_BITS=64 -DHAVE_
 "$CC" $CFLAGS -c "$ROOT/native/http_curl.c" -o /tmp/http_curl.o
 "$CC" $CFLAGS -c "$ROOT/native/mp4_avc.c" -o /tmp/mp4_avc.o
 "$CC" $CFLAGS -c "$ROOT/native/playlist.c" -o /tmp/playlist.o
+"$CC" $CFLAGS -c "$ROOT/native/osd_label.c" -o /tmp/osd_label.o
 "$CXX" -O2 -pie -pthread -Wl,-rpath,'$ORIGIN' -o "$ROOT/native/aerial-acb" \
-    /tmp/aerial-acb.o /tmp/http_curl.o /tmp/mp4_avc.o /tmp/playlist.o \
+    /tmp/aerial-acb.o /tmp/http_curl.o /tmp/mp4_avc.o /tmp/playlist.o /tmp/osd_label.o \
     "$BUILD/media/smp/acb/CMakeFiles/media-smp-acb-webos4.dir/acb_plane.c.o" \
     "$BUILD/media/smp/common/libmedia-smp-common-modern.a" \
     "$BUILD/media/common/libmedia-common-sdl.a" \

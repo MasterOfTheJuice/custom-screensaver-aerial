@@ -23,10 +23,13 @@ struct avc_movie {
     int64_t frame_ns;
     double duration_s;
     int nal_len;
+    /* Annex-B: each parameter set is its own NAL, with a 00 00 00 01 start code. */
     uint8_t *sps;
     size_t sps_len;
+    int sps_count;
     uint8_t *pps;
     size_t pps_len;
+    int pps_count;
     struct sample *samples;
     int nsamples;
     uint8_t *window;
@@ -159,7 +162,12 @@ static int find_child(const uint8_t *buf, size_t len, size_t start, const char *
     return -1;
 }
 
-static int copy_nals(const uint8_t *p, size_t n, int count_mask, uint8_t **out, size_t *out_len) {
+/* avcC stores a count and then length-prefixed NALs. The returned buffer is
+ * Annex-B: a start code in front of every NAL, not one blob of raw bytes.
+ * `out_count` is the number of NALs. The return value is still how many
+ * input bytes were consumed, including the count byte. */
+static int copy_nals(const uint8_t *p, size_t n, int count_mask, uint8_t **out, size_t *out_len,
+                     int *out_count) {
     struct cursor c;
     uint8_t count;
     uint8_t i;
@@ -172,12 +180,15 @@ static int copy_nals(const uint8_t *p, size_t n, int count_mask, uint8_t **out, 
         return -1;
     }
     count = (uint8_t) (count & count_mask);
+    if (out_count != NULL) {
+        *out_count = count;
+    }
     for (i = 0; i < count; i++) {
         uint16_t ln;
         if (rd16(&c, &ln) != 0 || skip(&c, ln) != 0) {
             return -1;
         }
-        total += ln;
+        total += 4 + (size_t) ln;
     }
     if (total == 0) {
         return -1;
@@ -191,13 +202,18 @@ static int copy_nals(const uint8_t *p, size_t n, int count_mask, uint8_t **out, 
         uint16_t ln = 0;
         if (rd16(&c, &ln) != 0) {
             free(*out);
+            *out = NULL;
             return -1;
         }
+        (*out)[at++] = 0;
+        (*out)[at++] = 0;
+        (*out)[at++] = 0;
+        (*out)[at++] = 1;
         memcpy(*out + at, c.p + c.i, ln);
         at += ln;
         c.i += ln;
     }
-    *out_len = total;
+    *out_len = at;
     return (int) (c.i);
 }
 
@@ -220,12 +236,12 @@ static int parse_avcc(const uint8_t *buf, size_t len, avc_movie *movie) {
     if (movie->nal_len != 4 && movie->nal_len != 2 && movie->nal_len != 1) {
         return -1;
     }
-    used = copy_nals(buf + c.i, len - c.i, 0x1f, &movie->sps, &movie->sps_len);
+    used = copy_nals(buf + c.i, len - c.i, 0x1f, &movie->sps, &movie->sps_len, &movie->sps_count);
     if (used < 0) {
         return -1;
     }
     c.i += (size_t) used;
-    used = copy_nals(buf + c.i, len - c.i, 0xff, &movie->pps, &movie->pps_len);
+    used = copy_nals(buf + c.i, len - c.i, 0xff, &movie->pps, &movie->pps_len, &movie->pps_count);
     if (used < 0) {
         return -1;
     }
@@ -702,9 +718,12 @@ avc_movie *avc_movie_open(http_client *http, const char *url, http_pump pump, vo
             }
             free(moov);
             fprintf(stderr,
-                    "[mp4] %s samples=%d %.1fs %dx%d fps %d/%d file=%lld bytes moov@%lld\n",
+                    "[mp4] %s samples=%d %.1fs %dx%d fps %d/%d file=%lld bytes moov@%lld "
+                    "sps=%d pps=%d start=%02x%02x%02x%02x\n",
                     url, movie->nsamples, movie->duration_s, movie->width, movie->height,
-                    movie->fps_num, movie->fps_den, (long long) movie->file_size, (long long) off);
+                    movie->fps_num, movie->fps_den, (long long) movie->file_size, (long long) off,
+                    movie->sps_count, movie->pps_count, movie->sps[0], movie->sps[1], movie->sps[2],
+                    movie->sps[3]);
             return movie;
         }
         off += (int64_t) a.size;
@@ -797,15 +816,6 @@ static int ensure_window(avc_movie *movie, int index, http_pump pump, void *ctx,
     return 0;
 }
 
-static void put_start(uint8_t *d, size_t *o, const uint8_t *nal, size_t n) {
-    d[(*o)++] = 0;
-    d[(*o)++] = 0;
-    d[(*o)++] = 0;
-    d[(*o)++] = 1;
-    memcpy(d + *o, nal, n);
-    *o += n;
-}
-
 bool avc_movie_sample(avc_movie *movie, int index, avc_au *out, http_pump pump, void *pump_ctx,
                       char *err, size_t err_len) {
     struct sample *s;
@@ -835,8 +845,15 @@ bool avc_movie_sample(avc_movie *movie, int index, avc_au *out, http_pump pump, 
         movie->au_cap = need;
     }
     if (key) {
-        put_start(movie->au, &o, movie->sps, movie->sps_len);
-        put_start(movie->au, &o, movie->pps, movie->pps_len);
+        /* sps/pps are already Annex-B, one start code per NAL. */
+        if (o + movie->sps_len + movie->pps_len > movie->au_cap) {
+            set_err(err, err_len, "au overflow");
+            return false;
+        }
+        memcpy(movie->au + o, movie->sps, movie->sps_len);
+        o += movie->sps_len;
+        memcpy(movie->au + o, movie->pps, movie->pps_len);
+        o += movie->pps_len;
     }
     i = 0;
     while (i + (size_t) movie->nal_len <= s->size) {

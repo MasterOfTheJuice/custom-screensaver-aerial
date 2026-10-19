@@ -1,41 +1,40 @@
-<!-- Summary (round 5): webOS 4 ACB helper must play the REAL Aerial playlist (streamed from videos.json URLs) instead of one local 50 s clip. Keep over-app display and exit-return working. Run autonomously; no approval wait. -->
+<!-- Summary (round 6): webOS 4 polish: correct place-name label for the video the helper is playing, plus housekeeping (debug override file, helper log, GStreamer noise, multi-SPS/PPS, reliable test key sending). Run autonomously; no approval wait. -->
 
 You are working on the Aerial custom screensaver for LG webOS TVs. NON-INTERACTIVE run (--always-approve): nobody answers questions. Write a short plan, then implement, deploy, verify, and print the final report.
 
-## State (read rtsp-evidence/round3/results.md and rtsp-evidence/round4/results.md first; they are authoritative)
-- webOS 4 path (isWebOS4 in assets/screensaver-main.qml) launches the native card app org.aabytt.webos.custom-screensaver-aerial.acb (source native/, build native/build.sh, SDK /home/motj/sdk/arm-webos-linux-gnueabi_sdk-buildroot). It plays H.264 Annex-B on the ACB MAIN sink (MSE player type, ES pushed with setMediaVideoData).
-- CAMERA-CONFIRMED and must stay working: Aerial over YouTube; EXIT and BACK relaunch returnTo (YouTube) via libluna-service2 LSRegister("") + LSCallOneReply applicationManager/launch; no helper left running.
-- GAP: the helper loops ONE pre-converted 50 s local clip. The TV has no ffmpeg. curl to sylvan.apple.com fails TLS verification ("unable to get local issuer certificate"); curl -k works.
+## State (read rtsp-evidence/round3/, round4/ and round5/results.md first; they are authoritative)
+- Committed baseline: commit 2b5f744 on main. Work on top of it. Do NOT commit or push; leave changes uncommitted.
+- webOS 4 path (isWebOS4 in assets/screensaver-main.qml) launches the card helper org.aabytt.webos.custom-screensaver-aerial.acb (native/, build native/build.sh, SDK /home/motj/sdk/arm-webos-linux-gnueabi_sdk-buildroot). The helper loads videos.json, shuffles, streams 1080p H.264 over verified TLS (bundled cacert.pem incl. Apple Root CA, dlopen'd system libcurl), demuxes MP4 in-tree, plays on the ACB MAIN sink, prefetches the next title (gap < 100 ms), skips bad URLs, and on EXIT/BACK relaunches returnTo via libluna-service2 LSRegister("").
+- CAMERA-CONFIRMED and must stay working: Aerial over YouTube, playlist advance, bad-URL skip, EXIT returns to YouTube, remote works afterwards.
 
-## Goal
-On webOS 4 the helper plays the real Aerial playlist: videos chosen the same way the QML chooses them (assets/videos.json or wherever the QML loads its list, honoring the user's settings where the QML does, preferring url-1080-H264 then url-1080-SDR), streamed from the network, advancing to the next video when one ends, continuously, without a black gap longer than ~2 s if feasible. webOS 5+ unchanged.
+## Tasks (in priority order)
+1. Place-name label. Today the QML shows the name for asset index 0 while the helper plays a shuffled, different URL. Make the label match what is on screen. Note round 3 found the screensaver QML process does NOT survive the helper's card launch, so QML cannot be the one drawing the label during playback; verify this first on the TV. Then pick the smallest correct option, e.g.: (a) the helper draws the label itself (SDL2 is already linked; an overlay on the UI plane above the ACB video, small text bottom-left, fades in/out like the original, using the same name/locale fields from videos.json that the QML uses, respecting the QML's show-name setting); or (b) if the label cannot be drawn without breaking the video, hide it on webOS 4 and document why. Do not regress video visibility. Camera must show the label text and it must match the playing title (log the title).
+2. Debug override file: the jailed helper cannot unlink a root-owned /tmp file. Move the override to a location the helper owns (e.g. its app data dir or a path under /tmp it creates itself), or only honour it when the helper is built with a debug flag. A leftover file must never change normal playback. Document how tests enable it.
+3. Helper log: cap its size (e.g. rotate at ~1 MB) and remove/truncate it on clean exit, or write only with a debug flag. No unbounded growth in /tmp.
+4. SPS/PPS: emit each SPS and PPS as its own Annex-B NAL (start code each) instead of one glued blob.
+5. GStreamer-CRITICAL lines at startup/unload: find the cause; fix if cheap and safe, otherwise document that they are harmless.
+6. Clean up leftover files from earlier rounds in TV /tmp (aerial-acb, aerial-acb.new, smp-acb.ipk, aerial-ca.pem, test scripts) once you have confirmed nothing uses them.
 
-## Design guidance (choose and justify; smallest robust option wins)
-1. Getting the list/URL to the helper: QML already picks a URL; pass the playlist (or a path to the json and settings) in the applicationManager/launch params, read via the helper's launch parameters (argv JSON on webOS native apps). Keep QML changes minimal and gated.
-2. Fetching: link libcurl (or the SDK's TLS lib) statically/dynamically in the helper. Do proper TLS verification: ship a CA bundle in the helper app dir (e.g. Mozilla cacert.pem from curl.se) and set CURLOPT_CAINFO. Do NOT disable verification. If the TV's clock or TLS version blocks it, document exactly why and only then fall back, clearly flagged.
-3. Demuxing: the files are MP4/MOV with H.264 (AVC). Convert avcC/length-prefixed samples to Annex-B (prepend SPS/PPS on keyframes), with correct PTS. Options: a small MP4 parser (e.g. minimp4 single-header, MIT), or static libavformat from the SDK if available. Stream with HTTP range reads or progressive download into a ring/temporary file under /tmp (watch RAM/disk; the TV has limited space; clean up). Handle moov-at-end files via range requests. Audio is not required (screensaver), but keep the silent-audio trick from round 3 if ACB needs an audio stream.
-4. Transition: on end-of-stream or error, move to the next URL. Reuse the ACB instance if it supports a new segment/flush; otherwise unload/reload quickly. Never leave the screen black on a single bad URL; skip it and log.
-5. Keep the local clip as an offline fallback if no network.
+## Test key sending (use for every test)
+Pointer socket /tmp/netinput.pointer.sock: 32-bit big-endian length + "type:button\nname:<KEY>\n\n". KEEP THE SOCKET OPEN ~1.5 s after writing (round 5 showed an immediate close can drop the key). Put this in a small reusable script (e.g. tools/tv-key.sh, run on the TV over SSH) and use it everywhere.
 
 ## Environment
 - SSH ONLY: ssh -F ~/.ssh/ssh_config tv ; scp -F ~/.ssh/ssh_config. Do not edit ~/.ssh.
-- luna-send needs a TTY over SSH: ssh -F ~/.ssh/ssh_config tv "script -q -c \"luna-send -n 1 luna://... '{}'\" /dev/null"
-- Camera: rtsp://192.168.11.179:554/live/ch00_0 (ffmpeg -rtsp_transport tcp). TV crop: crop=900:500:700:350 (verify by eye).
-- Remote keys: pointer socket /tmp/netinput.pointer.sock, 32-bit big-endian length + "type:button\nname:EXIT\n\n" (see round 4).
-- Reinstall the helper with the dev install path that updates appinfo (round 4 notes that editing appinfo on disk is not picked up).
+- luna-send needs a TTY: ssh -F ~/.ssh/ssh_config tv "script -q -c \"luna-send -n 1 luna://... '{}'\" /dev/null"
+- Camera: rtsp://192.168.11.179:554/live/ch00_0 (ffmpeg -rtsp_transport tcp). TV crop crop=900:500:700:350 (verify by eye). Host clock may differ from TV; use the camera overlay or date -u on the TV.
+- Reinstall the helper via the dev install path that refreshes appinfo.
 
 ## Constraints
-- Minimal changes; webOS 4 only, gated; webOS 5+ path unchanged; screensaver window type stays SCREENSAVER; helper stays a card with the returnTo relaunch.
-- Do NOT git commit or push. Do not edit prompts/next.md.
+- Minimal changes, webOS 4 only and gated; webOS 5+ unchanged; screensaver window type stays SCREENSAVER; helper stays a card with the returnTo relaunch; TLS verification stays on.
+- Do not edit prompts/next.md.
 - NEVER claim something is on screen without a camera frame showing it.
 
-## Verification (save under ./rtsp-evidence/round5/, write results.md)
-1. YouTube in front; before.jpg confirms YouTube.
-2. turnOnScreenSaver. Grab frames at ~15 s and +5 s: moving Aerial (numbers + your description). Log which URL is playing; confirm it is NOT the local clip (different scene than the round 3/4 underwater whale clip, or prove from logs that bytes came from the network).
-3. Prove playlist advance: either let a video end (they are several minutes; acceptable) or add a debug option to cap each video to ~45 s for the test only (off by default), then grab frames across the transition and show the scene changed to the next video; report the gap length from logs/frames.
-4. Robustness: one run with a bad URL inserted first (debug only) to show it is skipped.
-5. EXIT: camera shows YouTube again; DOWN key works; no helper or temp files left (check /tmp usage).
-6. Check memory/disk use on the TV during playback (free, df /tmp).
+## Verification (save under ./rtsp-evidence/round6/, write results.md)
+1. YouTube in front, before.jpg confirms it.
+2. turnOnScreenSaver; frames at ~15 s and +5 s show moving Aerial AND the label; zoom/crop the label area into its own image and read it; it must match the logged title. Repeat across one title change (use the debug cap via the new override mechanism) and show the label changed to the new title.
+3. Show that a leftover override file in the old /tmp location has no effect on normal playback.
+4. EXIT (with tools/tv-key.sh): camera shows YouTube; DOWN works; no helper process; helper log removed or bounded; /tmp clean.
+5. Regression: playlist advance and bad-URL skip still work (brief re-run).
 
 ## Final report (print at end)
-Design chosen and why; libraries added and licenses; TLS result; each attempt with camera results and numbers; transition gap; resource use; git diff --stat; remaining issues and recommended next step.
+Per task: what changed and why, camera evidence (label crops), numbers, TV log findings (GStreamer cause), git diff --stat, remaining issues, recommended next step (expected: real-world triggers — natural idle timeout, over a paused YouTube video, Netflix, HDMI with a live source — and packaging the helper into the main IPK).
